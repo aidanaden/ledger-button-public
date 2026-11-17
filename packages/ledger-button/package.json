@@ -30,10 +30,14 @@
       "default": "./dist/index.js"
     },
     "./package.json": "./package.json",
-    "./styles.css": "./dist/styles.css"
+    "./styles.css": {
+      "types": "./styles.css.d.ts",
+      "default": "./dist/styles.css"
+    }
   },
   "files": [
-    "dist"
+    "dist",
+    "styles.css.d.ts"
   ],
   "main": "./dist/index.js",
   "module": "./dist/index.js",
