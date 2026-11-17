@@ -1,5 +1,6 @@
-import { type Factory, inject, injectable } from "inversify";
+import { type Factory, inject, injectable, preDestroy } from "inversify";
 import { Maybe } from "purify-ts";
+import type { Subscription } from "rxjs";
 
 import type { BlockchainProvider } from "@api/blockchain-provider/model/BlockchainProvider";
 import type { BlockchainProviderFactory } from "@api/blockchain-provider/model/BlockchainProviderFactory";
@@ -34,6 +35,7 @@ const EVM_NATIVE_DECIMALS = 18;
 export class DefaultBlockchainProviderManager implements BlockchainProviderManager {
   private readonly logger: LoggerPublisher;
   private readonly providers = new Map<BlockchainFamily, BlockchainProvider>();
+  private contextSubscription?: Subscription;
 
   constructor(
     @inject(contextModuleTypes.ContextService)
@@ -68,10 +70,19 @@ export class DefaultBlockchainProviderManager implements BlockchainProviderManag
         },
       });
     }
-    this.contextService.observeContext().subscribe((context) => {
-      this.setSelectedAccounts(context.selectedAccounts);
-      this.setNetwork(context.chainId);
-    });
+    this.contextSubscription = this.contextService
+      .observeContext()
+      .subscribe((context) => {
+        this.setSelectedAccounts(context.selectedAccounts);
+        this.setNetwork(context.chainId);
+      });
+  }
+
+  @preDestroy()
+  dispose(): void {
+    this.contextSubscription?.unsubscribe();
+    this.contextSubscription = undefined;
+    this.providers.clear();
   }
 
   setSelectedAccounts(accounts: Map<BlockchainFamily, Account>): void {

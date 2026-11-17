@@ -54,6 +54,7 @@ describe("LedgerButtonCore", () => {
   };
   let connectDevice: { execute: ReturnType<typeof vi.fn> };
   let disconnectDevice: { execute: ReturnType<typeof vi.fn> };
+  let switchDevice: { execute: ReturnType<typeof vi.fn> };
   let deviceSessionState$: Subject<{ deviceStatus: DeviceStatus }>;
   let deviceService: {
     connectedDevice?: { sessionId: string };
@@ -64,13 +65,18 @@ describe("LedgerButtonCore", () => {
     };
   };
 
-  const createCore = () => {
+  const createCore = ({
+    initialization = Promise.resolve(),
+  }: { initialization?: Promise<void> } = {}) => {
     trackOpened = { execute: vi.fn() };
     trackActivated = { execute: vi.fn().mockResolvedValue(undefined) };
     connectDevice = {
       execute: vi.fn().mockResolvedValue({ sessionId: "new-session" }),
     };
     disconnectDevice = { execute: vi.fn().mockResolvedValue(undefined) };
+    switchDevice = {
+      execute: vi.fn().mockResolvedValue({ sessionId: "switched-session" }),
+    };
     deviceSessionState$ = new Subject();
     deviceService = {
       dmk: {
@@ -126,6 +132,7 @@ describe("LedgerButtonCore", () => {
       [deviceModuleTypes.DeviceManagementKitService, deviceService],
       [deviceModuleTypes.ConnectDeviceUseCase, connectDevice],
       [deviceModuleTypes.DisconnectDeviceUseCase, disconnectDevice],
+      [deviceModuleTypes.SwitchDeviceUseCase, switchDevice],
       [eventTrackingModuleTypes.TrackLedgerSyncOpenedUseCase, trackOpened],
       [eventTrackingModuleTypes.TrackLedgerSyncActivatedUseCase, trackActivated],
       [
@@ -141,6 +148,7 @@ describe("LedgerButtonCore", () => {
 
     hoisted.container = {
       get: vi.fn((token: symbol) => registry.get(token)),
+      unbindAll: vi.fn().mockResolvedValue(undefined),
     };
     hoisted.createContainer.mockReturnValue(hoisted.container);
 
@@ -151,7 +159,7 @@ describe("LedgerButtonCore", () => {
         initializeContext: () => void;
       },
       "initializeContext",
-    ).mockResolvedValue(undefined as never);
+    ).mockReturnValue(initialization as never);
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return new LedgerButtonCore({} as any);
@@ -418,6 +426,146 @@ describe("LedgerButtonCore", () => {
       await core.connectToDevice("usb");
 
       expect(connectDevice.execute).toHaveBeenCalledWith({ type: "usb" });
+    });
+  });
+
+  describe("dispose", () => {
+    it("closes DMK and unbinds the container", async () => {
+      const core = createCore();
+
+      await core.dispose();
+
+      expect(deviceService.dmk.close).toHaveBeenCalledOnce();
+      expect(hoisted.container.unbindAll).toHaveBeenCalledOnce();
+    });
+
+    it("stops reacting to the device once disposed", async () => {
+      const core = createCore();
+      connectDevice.execute.mockImplementation(async () => {
+        deviceService.connectedDevice = { sessionId: "session-1" };
+        return { sessionId: "session-1" };
+      });
+      await core.connectToDevice("usb");
+      disconnectDevice.execute.mockClear();
+
+      await core.dispose();
+      deviceSessionState$.next({ deviceStatus: DeviceStatus.NOT_CONNECTED });
+
+      expect(disconnectDevice.execute).not.toHaveBeenCalled();
+    });
+
+    it("waits for initialization before releasing anything", async () => {
+      let finishInitialization: () => void = () => undefined;
+      const core = createCore({
+        initialization: new Promise<void>((resolve) => {
+          finishInitialization = resolve;
+        }),
+      });
+
+      const disposal = core.dispose();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(deviceService.dmk.close).not.toHaveBeenCalled();
+      expect(hoisted.container.unbindAll).not.toHaveBeenCalled();
+
+      finishInitialization();
+      await disposal;
+
+      expect(deviceService.dmk.close).toHaveBeenCalledOnce();
+    });
+
+    it("still releases everything when initialization failed", async () => {
+      const core = createCore({
+        initialization: Promise.reject(new Error("dApp config unavailable")),
+      });
+
+      await expect(core.ready).rejects.toThrow("dApp config unavailable");
+      await expect(core.dispose()).resolves.toBeUndefined();
+
+      expect(deviceService.dmk.close).toHaveBeenCalledOnce();
+      expect(hoisted.container.unbindAll).toHaveBeenCalledOnce();
+    });
+
+    it("waits for a connection in progress before closing DMK", async () => {
+      const core = createCore();
+      let finishConnection: () => void = () => undefined;
+      connectDevice.execute.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finishConnection = () => {
+              deviceService.connectedDevice = { sessionId: "session-1" };
+              resolve({ sessionId: "session-1" });
+            };
+          }),
+      );
+      const connection = core.connectToDevice("usb");
+
+      const disposal = core.dispose();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(deviceService.dmk.close).not.toHaveBeenCalled();
+
+      finishConnection();
+      await connection;
+      await disposal;
+      deviceSessionState$.next({ deviceStatus: DeviceStatus.NOT_CONNECTED });
+
+      expect(deviceService.dmk.close).toHaveBeenCalledOnce();
+      expect(disconnectDevice.execute).not.toHaveBeenCalled();
+    });
+
+    it("waits for every connection in progress before closing DMK", async () => {
+      const core = createCore();
+      const finishers: (() => void)[] = [];
+      const pending = () =>
+        new Promise((resolve) => {
+          finishers.push(() => resolve({ sessionId: "session" }));
+        });
+      connectDevice.execute.mockImplementation(pending);
+      switchDevice.execute.mockImplementation(pending);
+      const first = core.connectToDevice("usb");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const switched = core.switchDevice("bluetooth");
+      const second = core.connectToDevice("usb");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const disposal = core.dispose();
+      finishers.slice(1).forEach((finish) => finish());
+      await Promise.all([switched, second]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(deviceService.dmk.close).not.toHaveBeenCalled();
+
+      finishers[0]();
+      await Promise.all([first, disposal]);
+
+      expect(deviceService.dmk.close).toHaveBeenCalledOnce();
+    });
+
+    it("rejects a device switch that starts after dispose", async () => {
+      const core = createCore();
+      void core.dispose();
+
+      await expect(core.switchDevice("usb")).rejects.toThrow(
+        "LedgerButtonCore is disposed",
+      );
+      expect(switchDevice.execute).not.toHaveBeenCalled();
+    });
+
+    it("rejects a connection that starts after dispose", async () => {
+      const core = createCore();
+      void core.dispose();
+
+      await expect(core.connectToDevice("usb")).rejects.toThrow(
+        "LedgerButtonCore is disposed",
+      );
+      expect(connectDevice.execute).not.toHaveBeenCalled();
+    });
+
+    it("releases only once when called again", async () => {
+      const core = createCore();
+
+      await Promise.all([core.dispose(), core.dispose()]);
+
+      expect(deviceService.dmk.close).toHaveBeenCalledOnce();
+      expect(hoisted.container.unbindAll).toHaveBeenCalledOnce();
     });
   });
 

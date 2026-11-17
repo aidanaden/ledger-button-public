@@ -188,6 +188,20 @@ describe("DefaultBlockchainProviderManager", () => {
     });
   });
 
+  describe("dispose()", () => {
+    it("drops the registered providers", () => {
+      manager.init(core, dappConfig, factories);
+      evmProvider.describeCurrency.mockReturnValue(evmDescriptor);
+      evmProvider.setNetwork.mockClear();
+
+      manager.dispose();
+      manager.setNetwork(137);
+
+      expect(evmProvider.setNetwork).not.toHaveBeenCalled();
+      expect(manager.describeCurrency("ethereum").isNothing()).toBe(true);
+    });
+  });
+
   describe("setSelectedAccounts()", () => {
     it("fans out the per-family account to each provider", () => {
       manager.init(core, dappConfig, factories);

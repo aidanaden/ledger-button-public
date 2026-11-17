@@ -174,6 +174,17 @@ describe("DefaultPendingTransactionController", () => {
   });
 
   describe("polling lifecycle", () => {
+    it("should stop polling when disposed", async () => {
+      const tx = createPendingTx();
+      mockStorageService._store.push(tx);
+      controller.track();
+
+      controller.dispose();
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(mockCheckPendingStatus.execute).not.toHaveBeenCalled();
+    });
+
     it("should start polling when track is called", () => {
       const tx = createPendingTx();
       mockStorageService._store.push(tx);
