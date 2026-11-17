@@ -1,5 +1,5 @@
-import { type Factory, inject, injectable } from "inversify";
-import { BehaviorSubject, filter, Observable } from "rxjs";
+import { type Factory, inject, injectable, preDestroy } from "inversify";
+import { BehaviorSubject, filter, Observable, type Subscription } from "rxjs";
 
 import type { BlockchainFamily } from "@api/blockchain-provider/model/types";
 import {
@@ -41,6 +41,7 @@ export class DefaultPendingTransactionController
     BehaviorSubject<BroadcastTracking | null>
   >();
   private pollingInterval: ReturnType<typeof setInterval> | undefined;
+  private contextSubscription: Subscription | undefined;
 
   constructor(
     @inject(loggerModuleTypes.LoggerPublisher)
@@ -68,6 +69,13 @@ export class DefaultPendingTransactionController
   track(): void {
     void this.emitCurrentState();
     this.startPolling();
+  }
+
+  @preDestroy()
+  dispose(): void {
+    this.contextSubscription?.unsubscribe();
+    clearInterval(this.pollingInterval);
+    this.pollingInterval = undefined;
   }
 
   observePendingTransactions(): Observable<PendingTransaction[]> {
@@ -112,21 +120,24 @@ export class DefaultPendingTransactionController
   private startPollingWhenAccountAvailable(): void {
     let preferredCurrency: string | undefined;
 
-    this.contextService.observeContext().subscribe((context) => {
-      const account = getActiveSelectedAccount(context);
-      const isHydrated = account && account.ticker && account.ticker.length > 0;
-      if (isHydrated && this.storageService.getAll().length > 0) {
-        this.startPolling();
-      }
+    this.contextSubscription = this.contextService
+      .observeContext()
+      .subscribe((context) => {
+        const account = getActiveSelectedAccount(context);
+        const isHydrated =
+          account && account.ticker && account.ticker.length > 0;
+        if (isHydrated && this.storageService.getAll().length > 0) {
+          this.startPolling();
+        }
 
-      if (
-        preferredCurrency !== undefined &&
-        context.preferredFiatCurrency !== preferredCurrency
-      ) {
-        void this.emitCurrentState();
-      }
-      preferredCurrency = context.preferredFiatCurrency;
-    });
+        if (
+          preferredCurrency !== undefined &&
+          context.preferredFiatCurrency !== preferredCurrency
+        ) {
+          void this.emitCurrentState();
+        }
+        preferredCurrency = context.preferredFiatCurrency;
+      });
   }
 
   private startPolling(): void {

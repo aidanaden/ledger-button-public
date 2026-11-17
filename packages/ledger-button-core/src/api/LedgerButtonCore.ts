@@ -111,6 +111,12 @@ import { MigrateDbUseCase } from "../internal/storage/use-case/MigrateDbUseCase"
 
 export type LedgerButtonCoreOptions = ContainerOptions;
 export class LedgerButtonCore {
+  /**
+   * Settles once the dApp config is loaded, the blockchain providers are
+   * announced and the persisted context is restored. Rejects if any of these
+   * steps fails.
+   */
+  readonly ready: Promise<void>;
   // Built once and never replaced: dApps hold on to the provider objects this
   // container produced, so swapping it would strand them on dead services.
   private readonly container: Container;
@@ -140,6 +146,10 @@ export class LedgerButtonCore {
   // Cleanup triggered by a physical disconnect, awaited before reconnecting so
   // it cannot tear down the session of the connection that follows it.
   private pendingDeviceCleanup?: Promise<void>;
+  // Connections in progress, awaited by dispose() so that no session opens
+  // after the Device Management Kit is closed.
+  private pendingConnections: Promise<void> = Promise.resolve();
+  private disposal?: Promise<void>;
 
   constructor(private readonly opts: LedgerButtonCoreOptions) {
     this.container = createContainer(this.opts);
@@ -152,10 +162,36 @@ export class LedgerButtonCore {
       modalModuleTypes.ModalService,
     );
 
-    this.initializeContext();
+    this.ready = this.initializeContext();
   }
 
-  private async initializeContext() {
+  /**
+   * Stops the device listener, closes the Device Management Kit sessions and
+   * unbinds the container. The unbind stops the context subscriptions of the
+   * blockchain provider manager and of the pending-transaction controller,
+   * and the poll interval of that controller. Waits for {@link ready} and for
+   * the device connections in progress first. Wallet providers already
+   * announced to the page stay registered. Await other calls on the core
+   * before calling it. The instance is unusable afterwards. Calling it again
+   * returns the same promise.
+   */
+  dispose(): Promise<void> {
+    this.disposal ??= this.release();
+    return this.disposal;
+  }
+
+  private async release(): Promise<void> {
+    await this.ready.catch((error: unknown) => {
+      this._logger.debug("Disposing after a failed initialization", { error });
+    });
+    await this.pendingConnections;
+    this.stopListeningToDevice();
+    await this.waitForPendingDeviceCleanup();
+    this.getDeviceService().dmk.close();
+    await this.container.unbindAll();
+  }
+
+  private async initializeContext(): Promise<void> {
     this._logger.debug("Initializing context");
 
     const dappConfig = await this.container
@@ -404,6 +440,22 @@ export class LedgerButtonCore {
 
   // Device methods
   async connectToDevice(type: ConnectionType) {
+    return this.trackConnection(() => this.connect(type));
+  }
+
+  private async trackConnection<T>(start: () => Promise<T>): Promise<T> {
+    if (this.disposal) {
+      throw new Error("LedgerButtonCore is disposed");
+    }
+    const connection = start();
+    this.pendingConnections = Promise.allSettled([
+      this.pendingConnections,
+      connection,
+    ]).then(() => undefined);
+    return connection;
+  }
+
+  private async connect(type: ConnectionType) {
     this._logger.debug("Connecting to device", { type });
 
     await this.waitForPendingDeviceCleanup();
@@ -446,9 +498,11 @@ export class LedgerButtonCore {
 
   async switchDevice(type: ConnectionType) {
     this._logger.debug("Switching device", { type });
-    return this.container
-      .get<SwitchDeviceUseCase>(deviceModuleTypes.SwitchDeviceUseCase)
-      .execute({ type });
+    return this.trackConnection(() =>
+      this.container
+        .get<SwitchDeviceUseCase>(deviceModuleTypes.SwitchDeviceUseCase)
+        .execute({ type }),
+    );
   }
 
   async fetchAccountsFromCloudSync(): Promise<Account[]> {

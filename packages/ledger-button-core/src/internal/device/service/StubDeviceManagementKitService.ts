@@ -12,7 +12,9 @@ import { DeviceManagementKitService } from "./DeviceManagementKitService";
 export class StubDeviceManagementKitService
   implements DeviceManagementKitService
 {
-  dmk: DeviceManagementKit = {} as DeviceManagementKit;
+  dmk: DeviceManagementKit = {
+    close: () => undefined,
+  } as unknown as DeviceManagementKit;
   sessionId: string | undefined = "session-id-123";
   connectedDevice: Device | undefined = new Device({
     name: "GM's Flex",
